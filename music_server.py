@@ -14,6 +14,10 @@ state = {
     "index": 1,
     "process": None,
     "paused": False,
+    "title": None,
+    "webpage_url": None,
+    "duration": None,
+    "thumbnail": None,
 }
 
 def cleanup_socket():
@@ -23,11 +27,12 @@ def cleanup_socket():
         except Exception:
             pass
 
-def resolve_url(query: str, index: int) -> str:
+def resolve_track(query: str, index: int) -> dict:
     result = subprocess.run(
-        ["yt-dlp", f"ytsearch{index}:{query}", "-g"],
+        ["yt-dlp", "-f", "bestaudio", "--dump-json", f"ytsearch{index}:{query}"],
         capture_output=True,
-        text=True
+        text=True,
+        timeout=45,
     )
 
     if result.returncode != 0:
@@ -35,9 +40,24 @@ def resolve_url(query: str, index: int) -> str:
 
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if not lines:
+        raise RuntimeError("No se encontró metadata para reproducir")
+
+    try:
+        info = json.loads(lines[-1])
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"yt-dlp devolvió metadata inválida: {e}")
+
+    url = info.get("url")
+    if not url:
         raise RuntimeError("No se encontró URL para reproducir")
 
-    return lines[-1]
+    return {
+        "url": url,
+        "title": info.get("title") or query,
+        "webpage_url": info.get("webpage_url") or info.get("original_url"),
+        "duration": info.get("duration"),
+        "thumbnail": info.get("thumbnail"),
+    }
 
 def stop_current():
     proc = state.get("process")
@@ -53,19 +73,23 @@ def stop_current():
 
     state["process"] = None
     state["paused"] = False
+    state["title"] = None
+    state["webpage_url"] = None
+    state["duration"] = None
+    state["thumbnail"] = None
     cleanup_socket()
 
 def start_playback(query: str, index: int):
     stop_current()
     cleanup_socket()
 
-    url = resolve_url(query, index)
+    track = resolve_track(query, index)
 
     proc = subprocess.Popen([
         "mpv",
         f"--input-ipc-server={MPV_SOCKET}",
         "--force-window=yes",
-        url
+        track["url"]
     ])
 
     # Darle tiempo a mpv para abrir el socket
@@ -78,8 +102,12 @@ def start_playback(query: str, index: int):
     state["index"] = index
     state["process"] = proc
     state["paused"] = False
+    state["title"] = track.get("title")
+    state["webpage_url"] = track.get("webpage_url")
+    state["duration"] = track.get("duration")
+    state["thumbnail"] = track.get("thumbnail")
 
-    return url
+    return track
 
 def mpv_command(command_list):
     if not os.path.exists(MPV_SOCKET):
@@ -105,15 +133,19 @@ def play():
         return jsonify({"status": "error", "message": "No query provided"}), 400
 
     try:
-        url = start_playback(query, 1)
+        track = start_playback(query, 1)
         print(f"🎵 Query recibida: {query}", flush=True)
-        print(f"🔗 URL resuelta: {url[:120]}...", flush=True)
+        print(f"🎼 Título resuelto: {track.get('title')}", flush=True)
 
         return jsonify({
             "status": "ok",
-            "message": f"Reproduciendo: {query}",
+            "message": f"Reproduciendo: {track.get('title') or query}",
             "query": query,
-            "index": 1
+            "index": 1,
+            "title": track.get("title"),
+            "webpage_url": track.get("webpage_url"),
+            "duration": track.get("duration"),
+            "thumbnail": track.get("thumbnail"),
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -152,15 +184,19 @@ def next_track():
 
     try:
         new_index = state["index"] + 1
-        url = start_playback(query, new_index)
+        track = start_playback(query, new_index)
         print(f"⏭️ Siguiente resultado: {query} [{new_index}]", flush=True)
-        print(f"🔗 URL resuelta: {url[:120]}...", flush=True)
+        print(f"🎼 Título resuelto: {track.get('title')}", flush=True)
 
         return jsonify({
             "status": "ok",
-            "message": f"Siguiente: {query} (resultado {new_index})",
+            "message": f"Siguiente: {track.get('title') or query}",
             "query": query,
-            "index": new_index
+            "index": new_index,
+            "title": track.get("title"),
+            "webpage_url": track.get("webpage_url"),
+            "duration": track.get("duration"),
+            "thumbnail": track.get("thumbnail"),
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -176,15 +212,19 @@ def previous_track():
 
     try:
         new_index = state["index"] - 1
-        url = start_playback(query, new_index)
+        track = start_playback(query, new_index)
         print(f"⏮️ Resultado anterior: {query} [{new_index}]", flush=True)
-        print(f"🔗 URL resuelta: {url[:120]}...", flush=True)
+        print(f"🎼 Título resuelto: {track.get('title')}", flush=True)
 
         return jsonify({
             "status": "ok",
-            "message": f"Anterior: {query} (resultado {new_index})",
+            "message": f"Anterior: {track.get('title') or query}",
             "query": query,
-            "index": new_index
+            "index": new_index,
+            "title": track.get("title"),
+            "webpage_url": track.get("webpage_url"),
+            "duration": track.get("duration"),
+            "thumbnail": track.get("thumbnail"),
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -195,9 +235,15 @@ def status():
     return jsonify({
         "status": "ok",
         "running": running,
+        "playing": running and not state["paused"],
         "query": state["query"],
         "index": state["index"],
-        "paused": state["paused"]
+        "paused": state["paused"],
+        "title": state["title"],
+        "webpage_url": state["webpage_url"],
+        "duration": state["duration"],
+        "thumbnail": state["thumbnail"],
+        "target": "laptop",
     })
 
 if __name__ == "__main__":
