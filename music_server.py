@@ -16,6 +16,7 @@ YTDLP_FORMATS = [
     for value in os.getenv("JARVIS_YTDLP_FORMATS", "bestaudio/best[height<=480]/best,best").split(",")
     if value.strip()
 ]
+YTDLP_SEARCH_FALLBACKS = max(1, int(os.getenv("JARVIS_YTDLP_SEARCH_FALLBACKS", "5")))
 
 state = {
     "query": None,
@@ -55,47 +56,49 @@ def cleanup_socket():
 def resolve_track(query: str, index: int) -> dict:
     last_error = None
 
-    for selected_format in YTDLP_FORMATS:
-        result = subprocess.run(
-            [
-                *yt_dlp_base_args(),
-                "-f",
-                selected_format,
-                "--dump-json",
-                f"ytsearch{index}:{query}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=45,
-        )
+    for candidate_index in range(index, index + YTDLP_SEARCH_FALLBACKS):
+        for selected_format in YTDLP_FORMATS:
+            result = subprocess.run(
+                [
+                    *yt_dlp_base_args(),
+                    "-f",
+                    selected_format,
+                    "--dump-json",
+                    f"ytsearch{candidate_index}:{query}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
 
-        if result.returncode != 0:
-            last_error = result.stderr.strip() or "yt-dlp falló"
-            continue
+            if result.returncode != 0:
+                last_error = result.stderr.strip() or "yt-dlp falló"
+                continue
 
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        if not lines:
-            last_error = "No se encontró metadata para reproducir"
-            continue
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if not lines:
+                last_error = f"No se encontró metadata para reproducir en resultado {candidate_index}"
+                continue
 
-        try:
-            info = json.loads(lines[-1])
-        except json.JSONDecodeError as e:
-            last_error = f"yt-dlp devolvió metadata inválida: {e}"
-            continue
+            try:
+                info = json.loads(lines[-1])
+            except json.JSONDecodeError as e:
+                last_error = f"yt-dlp devolvió metadata inválida en resultado {candidate_index}: {e}"
+                continue
 
-        url = info.get("url")
-        if not url:
-            last_error = "No se encontró URL para reproducir"
-            continue
+            url = info.get("url")
+            if not url:
+                last_error = f"No se encontró URL para reproducir en resultado {candidate_index}"
+                continue
 
-        return {
-            "url": url,
-            "title": info.get("title") or query,
-            "webpage_url": info.get("webpage_url") or info.get("original_url"),
-            "duration": info.get("duration"),
-            "thumbnail": info.get("thumbnail"),
-        }
+            return {
+                "url": url,
+                "title": info.get("title") or query,
+                "webpage_url": info.get("webpage_url") or info.get("original_url"),
+                "duration": info.get("duration"),
+                "thumbnail": info.get("thumbnail"),
+                "resolved_index": candidate_index,
+            }
 
     raise RuntimeError(last_error or "yt-dlp falló")
 
@@ -139,7 +142,7 @@ def start_playback(query: str, index: int):
         time.sleep(0.1)
 
     state["query"] = query
-    state["index"] = index
+    state["index"] = int(track.get("resolved_index") or index)
     state["process"] = proc
     state["paused"] = False
     state["title"] = track.get("title")
@@ -181,7 +184,7 @@ def play():
             "status": "ok",
             "message": f"Reproduciendo: {track.get('title') or query}",
             "query": query,
-            "index": 1,
+            "index": state["index"],
             "title": track.get("title"),
             "webpage_url": track.get("webpage_url"),
             "duration": track.get("duration"),
@@ -232,7 +235,7 @@ def next_track():
             "status": "ok",
             "message": f"Siguiente: {track.get('title') or query}",
             "query": query,
-            "index": new_index,
+            "index": state["index"],
             "title": track.get("title"),
             "webpage_url": track.get("webpage_url"),
             "duration": track.get("duration"),
@@ -260,7 +263,7 @@ def previous_track():
             "status": "ok",
             "message": f"Anterior: {track.get('title') or query}",
             "query": query,
-            "index": new_index,
+            "index": state["index"],
             "title": track.get("title"),
             "webpage_url": track.get("webpage_url"),
             "duration": track.get("duration"),
