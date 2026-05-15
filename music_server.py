@@ -3,11 +3,19 @@ import subprocess
 import socket
 import json
 import os
+import shutil
 import time
+from pathlib import Path
 
 app = Flask(__name__)
 
 MPV_SOCKET = "/tmp/jarvis-mpv.sock"
+DEFAULT_NODE_PATH = Path.home() / ".nvm" / "versions" / "node" / "v24.15.0" / "bin" / "node"
+YTDLP_FORMATS = [
+    value.strip()
+    for value in os.getenv("JARVIS_YTDLP_FORMATS", "bestaudio/best[height<=480]/best,best").split(",")
+    if value.strip()
+]
 
 state = {
     "query": None,
@@ -20,6 +28,23 @@ state = {
     "thumbnail": None,
 }
 
+def node_runtime_path():
+    configured = os.getenv("JARVIS_YTDLP_NODE_PATH") or os.getenv("YTDLP_NODE_PATH")
+    candidates = [configured, str(DEFAULT_NODE_PATH), shutil.which("node")]
+
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+
+    return None
+
+def yt_dlp_base_args():
+    args = ["yt-dlp"]
+    node_path = node_runtime_path()
+    if node_path:
+        args.extend(["--no-js-runtimes", "--js-runtimes", f"node:{node_path}"])
+    return args
+
 def cleanup_socket():
     if os.path.exists(MPV_SOCKET):
         try:
@@ -28,36 +53,51 @@ def cleanup_socket():
             pass
 
 def resolve_track(query: str, index: int) -> dict:
-    result = subprocess.run(
-        ["yt-dlp", "-f", "bestaudio", "--dump-json", f"ytsearch{index}:{query}"],
-        capture_output=True,
-        text=True,
-        timeout=45,
-    )
+    last_error = None
 
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "yt-dlp falló")
+    for selected_format in YTDLP_FORMATS:
+        result = subprocess.run(
+            [
+                *yt_dlp_base_args(),
+                "-f",
+                selected_format,
+                "--dump-json",
+                f"ytsearch{index}:{query}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
 
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not lines:
-        raise RuntimeError("No se encontró metadata para reproducir")
+        if result.returncode != 0:
+            last_error = result.stderr.strip() or "yt-dlp falló"
+            continue
 
-    try:
-        info = json.loads(lines[-1])
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"yt-dlp devolvió metadata inválida: {e}")
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if not lines:
+            last_error = "No se encontró metadata para reproducir"
+            continue
 
-    url = info.get("url")
-    if not url:
-        raise RuntimeError("No se encontró URL para reproducir")
+        try:
+            info = json.loads(lines[-1])
+        except json.JSONDecodeError as e:
+            last_error = f"yt-dlp devolvió metadata inválida: {e}"
+            continue
 
-    return {
-        "url": url,
-        "title": info.get("title") or query,
-        "webpage_url": info.get("webpage_url") or info.get("original_url"),
-        "duration": info.get("duration"),
-        "thumbnail": info.get("thumbnail"),
-    }
+        url = info.get("url")
+        if not url:
+            last_error = "No se encontró URL para reproducir"
+            continue
+
+        return {
+            "url": url,
+            "title": info.get("title") or query,
+            "webpage_url": info.get("webpage_url") or info.get("original_url"),
+            "duration": info.get("duration"),
+            "thumbnail": info.get("thumbnail"),
+        }
+
+    raise RuntimeError(last_error or "yt-dlp falló")
 
 def stop_current():
     proc = state.get("process")
@@ -88,7 +128,7 @@ def start_playback(query: str, index: int):
     proc = subprocess.Popen([
         "mpv",
         f"--input-ipc-server={MPV_SOCKET}",
-        "--force-window=yes",
+        "--no-video",
         track["url"]
     ])
 
