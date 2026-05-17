@@ -1,0 +1,13 @@
+[Unit]
+Description=JARVIS Music Node (User)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/samsung-ubuntu/jarvis_node
+ExecStart=/usr/bin/python3 /home/samsung-ubuntu/jarvis_node/music_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
