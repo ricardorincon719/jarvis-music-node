@@ -436,5 +436,7 @@ def status():
 if __name__ == "__main__":
     if not MUSIC_TOKEN:
         raise SystemExit("Falta JARVIS_MUSIC_TOKEN: el nodo de música no arranca sin token.")
+    from waitress import serve
+
     print("🔥 Music Node corriendo...", flush=True)
-    app.run(host="0.0.0.0", port=5005)
+    serve(app, host="0.0.0.0", port=5005, threads=4)
