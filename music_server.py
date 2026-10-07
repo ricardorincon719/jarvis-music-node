@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 import shutil
@@ -9,6 +10,8 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+
+MUSIC_TOKEN = os.getenv("JARVIS_MUSIC_TOKEN", "").strip()
 
 MPV_SOCKET = "/tmp/jarvis-mpv.sock"
 DEFAULT_NODE_PATH = (
@@ -277,6 +280,19 @@ def mpv_command(command_list):
         client.close()
 
 
+@app.before_request
+def require_token():
+    """Exige Authorization: Bearer <JARVIS_MUSIC_TOKEN> en todas las rutas."""
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    if not (
+        MUSIC_TOKEN
+        and scheme.lower() == "bearer"
+        and hmac.compare_digest(token.strip().encode(), MUSIC_TOKEN.encode())
+    ):
+        return jsonify({"status": "error", "message": "unauthorized"}), 401
+    return None
+
+
 @app.route("/play", methods=["POST"])
 def play():
     data = request.get_json(silent=True) or {}
@@ -418,5 +434,7 @@ def status():
 
 
 if __name__ == "__main__":
+    if not MUSIC_TOKEN:
+        raise SystemExit("Falta JARVIS_MUSIC_TOKEN: el nodo de música no arranca sin token.")
     print("🔥 Music Node corriendo...", flush=True)
     app.run(host="0.0.0.0", port=5005)

@@ -8,6 +8,10 @@ import music_server
 
 class MusicServerTests(unittest.TestCase):
     def setUp(self):
+        token_patch = patch("music_server.MUSIC_TOKEN", "token-de-prueba")
+        token_patch.start()
+        self.addCleanup(token_patch.stop)
+        self.auth = {"Authorization": "Bearer token-de-prueba"}
         music_server.state.update({
             "query": None,
             "index": 1,
@@ -95,11 +99,35 @@ class MusicServerTests(unittest.TestCase):
     def test_play_returns_error_instead_of_false_success(self, _start_playback):
         client = music_server.app.test_client()
 
-        response = client.post("/play", json={"query": "canción"})
+        response = client.post(
+            "/play", json={"query": "canción"}, headers=self.auth
+        )
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.get_json()["status"], "error")
         self.assertNotIn("Reproduciendo", response.get_json()["message"])
+
+    def test_requests_without_valid_token_are_rejected(self):
+        client = music_server.app.test_client()
+
+        for headers in (
+            {},
+            {"Authorization": "Bearer otro-token"},
+            {"Authorization": "token-de-prueba"},
+        ):
+            response = client.get("/status", headers=headers)
+            self.assertEqual(response.status_code, 401)
+
+        response = client.get("/status", headers=self.auth)
+        self.assertEqual(response.status_code, 200)
+
+    def test_requests_are_rejected_when_no_token_is_configured(self):
+        client = music_server.app.test_client()
+
+        with patch("music_server.MUSIC_TOKEN", ""):
+            response = client.get("/status", headers={"Authorization": "Bearer "})
+
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":
