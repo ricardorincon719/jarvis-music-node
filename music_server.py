@@ -1,10 +1,14 @@
 import hmac
 import json
 import os
+import queue
 import shutil
 import socket
 import subprocess
+import threading
 import time
+import urllib.request
+import uuid
 from pathlib import Path
 
 from flask import Flask, jsonify, request
@@ -36,6 +40,13 @@ YTDLP_PLAYER_CLIENTS = [
 ]
 YTDLP_SEARCH_FALLBACKS = max(1, int(os.getenv("JARVIS_YTDLP_SEARCH_FALLBACKS", "5")))
 MPV_STARTUP_TIMEOUT = max(1.0, float(os.getenv("JARVIS_MPV_STARTUP_TIMEOUT", "8")))
+
+# JARVIS Brain: si está definido, la música enciende su región del cerebro.
+BRAIN_URL = os.getenv("JINNEX_BRAIN_URL", "").strip()
+BRAIN_TOKEN = os.getenv("JINNEX_BRAIN_TOKEN", "").strip()
+BRAIN_TTL = 600         # una canción larga se renueva antes de vencer
+BRAIN_RENEW_SECONDS = 240
+BRAIN_WATCH_SECONDS = 5
 
 state = {
     "query": None,
@@ -158,9 +169,89 @@ def terminate_process(proc):
             pass
 
 
+# ------------------------------------------------------------
+# JARVIS Brain
+# ------------------------------------------------------------
+
+_brain_queue = queue.Queue(maxsize=100)
+_brain_lock = threading.Lock()
+_brain = {"id": None, "detail": "", "renewed": 0.0, "playing": False, "worker": None}
+
+
+def _brain_post(message):
+    headers = {"Content-Type": "application/json"}
+    if BRAIN_TOKEN:
+        headers["X-Brain-Token"] = BRAIN_TOKEN
+    req = urllib.request.Request(BRAIN_URL, data=json.dumps(message).encode(),
+                                 headers=headers, method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=0.5).close()
+    except Exception:
+        pass  # la visualización nunca afecta a la música
+
+
+def _brain_run():
+    while True:
+        try:
+            message = _brain_queue.get(timeout=BRAIN_WATCH_SECONDS)
+        except queue.Empty:
+            try:
+                brain_watch()
+            except Exception:
+                pass  # el hilo de envío no debe morir nunca
+            continue
+        _brain_post(message)
+
+
+def _brain_send(message):
+    if _brain["worker"] is None:
+        _brain["worker"] = threading.Thread(target=_brain_run, name="brain-music",
+                                            daemon=True)
+        _brain["worker"].start()
+    try:
+        _brain_queue.put_nowait(message)
+    except queue.Full:
+        pass
+
+
+def brain_music(detail, playing=True):
+    """Encender (o actualizar) la región de música. Nunca bloquea ni falla."""
+    if not BRAIN_URL:
+        return
+    with _brain_lock:
+        _brain["id"] = _brain["id"] or uuid.uuid4().hex
+        _brain["detail"] = detail
+        _brain["playing"] = playing
+        _brain["renewed"] = time.monotonic()
+        _brain_send({"phase": "start", "region": "musica", "id": _brain["id"],
+                     "source": "music", "detail": detail, "ttl": BRAIN_TTL})
+
+
+def brain_music_end(ok=True, reason=""):
+    if not BRAIN_URL:
+        return
+    with _brain_lock:
+        if _brain["id"] is None:
+            return
+        _brain_send({"phase": "end", "id": _brain["id"], "ok": ok, "reason": reason})
+        _brain["id"] = None
+
+
+def brain_watch():
+    """Apagar la región si mpv terminó solo y renovarla mientras siga sonando."""
+    if _brain["id"] is None or not _brain["playing"]:
+        return  # mientras busca todavía no hay proceso de mpv que vigilar
+    proc = state.get("process")
+    if proc is None or proc.poll() is not None:
+        brain_music_end(True, "terminó")
+    elif time.monotonic() - _brain["renewed"] >= BRAIN_RENEW_SECONDS:
+        brain_music(_brain["detail"])
+
+
 def stop_current():
     proc = state.get("process")
     terminate_process(proc)
+    brain_music_end()
 
     state["process"] = None
     state["paused"] = False
@@ -200,6 +291,7 @@ def wait_for_playback(proc):
 
 def start_playback(query: str, index: int):
     stop_current()
+    brain_music("buscando música", playing=False)
     errors = []
 
     for candidate_index in range(index, index + YTDLP_SEARCH_FALLBACKS):
@@ -252,11 +344,13 @@ def start_playback(query: str, index: int):
                 state["thumbnail"] = track.get("thumbnail")
                 state["player_client"] = track.get("player_client")
                 state["last_error"] = None
+                brain_music(track.get("title") or "sonando")
                 return track
 
     state["last_error"] = (
         errors[-1] if errors else "No se encontró una fuente reproducible"
     )
+    brain_music_end(False, "sin fuente")
     raise RuntimeError(
         "No pude iniciar una fuente de audio reproducible. "
         f"Último error: {state['last_error']}"
@@ -325,6 +419,7 @@ def pause():
     try:
         mpv_command(["set_property", "pause", True])
         state["paused"] = True
+        brain_music_end(True, "pausa")
         return jsonify({"status": "ok", "message": "Música en pausa"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -335,6 +430,7 @@ def resume():
     try:
         mpv_command(["set_property", "pause", False])
         state["paused"] = False
+        brain_music(state.get("title") or "sonando")
         return jsonify({"status": "ok", "message": "Música reanudada"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500

@@ -6,6 +6,7 @@ After=default.target
 Type=simple
 WorkingDirectory=/home/samsung-ubuntu/jarvis_node
 EnvironmentFile=%h/.config/jarvis-music/music.env
+Environment=JINNEX_BRAIN_URL=http://127.0.0.1:5008/event
 ExecStart=/home/samsung-ubuntu/jarvis_node/venv/bin/python /home/samsung-ubuntu/jarvis_node/music_server.py
 Restart=always
 RestartSec=5
